@@ -96,8 +96,6 @@ public class Router extends Thread {
                 }
             }
         }
-
-
     }
 
     /**
@@ -164,7 +162,8 @@ public class Router extends Thread {
                             }
 
                             // c(x,v) + Dv(y)
-                            routerAndCost.cost = immediateNeighbourCost.get(immediateNeighbour.getRouterId()) + immediateNeighboursDV.get(immediateNeighbour.getRouterId()).get(destNode);
+                            routerAndCost.cost = immediateNeighbourCost.get(immediateNeighbour.getRouterId())
+                                    + immediateNeighboursDV.get(immediateNeighbour.getRouterId()).get(destNode);
                             return routerAndCost;
                         }).collect(Collectors.toList());
 
