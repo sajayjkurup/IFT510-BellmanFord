@@ -1,7 +1,10 @@
 package org.asu.ift.module6.domain;
 
+import com.sun.org.apache.xml.internal.utils.Hashtree2Node;
+
 import java.lang.reflect.Array;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.stream.Collectors;
 
@@ -13,8 +16,10 @@ public class Router extends Thread {
     private String id;
     private DistanceVector distanceVector = new DistanceVector();
     private List<Router> immediateNeighbours = new ArrayList<>();
-    private Map<String, DistanceVector> immediateNeighboursDV = new HashMap<>();
+    private Map<String,Integer>  immediateNeighbourCost = Collections.synchronizedMap(new HashMap<>());
+    private Map<String, DistanceVector> immediateNeighboursDV = Collections.synchronizedMap(new HashMap<>()); ;
     private List<String> allNodesInNetwork = new ArrayList<>();
+    private Map<String,String> nextHopRouter = Collections.synchronizedMap(new HashMap<>());
 
     private final Integer HIGH_COST = 999;
 
@@ -52,7 +57,8 @@ public class Router extends Thread {
         }
         this.immediateNeighbours.add(router);
         this.immediateNeighboursDV.put(router.getRouterId(),null);
-        distanceVector.put(router.getRouterId(),cost);
+        immediateNeighbourCost.put(router.getRouterId(),cost); //save original costs
+        distanceVector.put(router.getRouterId(),cost); // initialize distance vector for router
     }
 
     public void run(){
@@ -83,13 +89,8 @@ public class Router extends Thread {
         synchronized(lock) {
             while(true) {
                 try {
-
                     lock.wait();
-
-                    //print routing table after update/iteration
-                    prettyPrintRT();
-                    //print distance vector after update/iteration
-                    prettyPrintDV();
+                    prettyPrintNextHopRouter();
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
@@ -103,9 +104,7 @@ public class Router extends Thread {
      * Get notified about neighbours distance vector update.
      * @param distanceVector
      */
-    public void neighbourDVChanged(DistanceVector distanceVector){
-        System.out.println("Router " + id +" | Received update from neighbour "+distanceVector.getOriginatedRouterId());
-
+    public synchronized void neighbourDVChanged(DistanceVector distanceVector){
         /*
          * Save neighbours update.
          */
@@ -114,8 +113,7 @@ public class Router extends Thread {
         /*
          * process new distance vector
          */
-        processDistanceVector(distanceVector);
-
+        processDistanceVectorChange();
         synchronized(lock) {
             lock.notifyAll();
         }
@@ -125,7 +123,7 @@ public class Router extends Thread {
      * Broadcast change in distance vector.
      * (Use a different thread to notify and not notify on Routers main thread.)
      */
-    private void broadcastDVToNeighbours(){
+    private synchronized void broadcastDVToNeighbours(){
         Thread thread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -138,15 +136,7 @@ public class Router extends Thread {
     /*
      * process DV change notification from neighbor
      */
-    private synchronized void processDistanceVector(DistanceVector neighbourDistanceVector) {
-        if(neighbourDistanceVector == null){
-            throw new IllegalArgumentException("Router "+id+" Distance Vector cannot be null");
-        }
-
-        if(neighbourDistanceVector.getOriginatedRouterId() == null){
-            throw new IllegalArgumentException("Router "+id+" Distance Vector originated Router cannot be null");
-        }
-
+    private synchronized void processDistanceVectorChange() {
         Map<String, Integer> newDistanceVector = new HashMap<>();
         newDistanceVector.put(id,0);
 
@@ -159,26 +149,32 @@ public class Router extends Thread {
                 /*
                  * Compute c(x,v) + Dv(y)
                  */
-                List<Integer> costs = immediateNeighbours.stream().map(
+                List<RouterAndCost> costs = immediateNeighbours.stream().map(
                         immediateNeighbour -> {
+                            RouterAndCost routerAndCost = new RouterAndCost();
+                            routerAndCost.routerId = immediateNeighbour.getRouterId();
+
                             if(immediateNeighbour.getRouterId().equals(destNode)){
-                                return distanceVector.get(immediateNeighbour.getRouterId()); // Dv(v) will be 0. hence return c(x,v)
+                                routerAndCost.cost = immediateNeighbourCost.get(immediateNeighbour.getRouterId()); // Dv(v) will be 0. hence return c(x,v)
+                                return routerAndCost;
                             }
                             if(immediateNeighboursDV.get(immediateNeighbour.getRouterId()) == null){ //DV from v not available. Assume Infinity
-                                return HIGH_COST;
+                                routerAndCost.cost = HIGH_COST;
+                                return routerAndCost;
                             }
 
                             // c(x,v) + Dv(y)
-                            return distanceVector.get(immediateNeighbour.getRouterId()) + immediateNeighboursDV.get(immediateNeighbour.getRouterId()).get(destNode);
-
+                            routerAndCost.cost = immediateNeighbourCost.get(immediateNeighbour.getRouterId()) + immediateNeighboursDV.get(immediateNeighbour.getRouterId()).get(destNode);
+                            return routerAndCost;
                         }).collect(Collectors.toList());
 
                 /*
                  * min(c(x,v) + Dv(y))
                  */
                 Collections.sort(costs);
-                Integer minimumCost = costs.get(0);
-
+                RouterAndCost minimumRouterAndCost = costs.get(0);
+                Integer minimumCost = minimumRouterAndCost.cost;
+                nextHopRouter.put(destNode,minimumRouterAndCost.routerId);
                 newDistanceVector.put(destNode, minimumCost);
             }
         });
@@ -202,7 +198,7 @@ public class Router extends Thread {
      */
     private void prettyPrintRT(){
         StringBuilder builder = new StringBuilder();
-        builder.append("------------------- Routing Table for Router "+id.toUpperCase()+" -----------------------\n");
+        builder.append("\n------------------- Routing Table for Router "+id.toUpperCase()+" -----------------------\n");
         immediateNeighboursDV.keySet().stream().forEach(routerId -> {
             builder.append(""+routerId.toUpperCase() + " : "+immediateNeighboursDV.get(routerId)+"\n");
         });
@@ -216,11 +212,42 @@ public class Router extends Thread {
      */
     private void prettyPrintDV(){
         StringBuilder builder = new StringBuilder();
-        builder.append("------------------- Distance Vector for Router "+id.toUpperCase()+" -------------------------------------\n");
+        builder.append("\n------------------- Distance Vector for Router "+id.toUpperCase()+" -------------------------------------\n");
         distanceVector.keySet().stream().forEach(routerId -> {
             builder.append(id+" -> "+routerId + " : cost : "+distanceVector.get(routerId)+"\n");
         });
         builder.append("-------------------------------------------------------------------------------------\n");
         System.out.println(builder);
+    }
+
+    private void prettyPrintNextHopRouter(){
+        StringBuilder builder = new StringBuilder();
+        builder.append("\n------------------- Forwarding Table for Router "+id.toUpperCase()+" -------------------------------------\n");
+        allNodesInNetwork.stream().forEach(routerId -> {
+            String nextHopRouterId = nextHopRouter.get(routerId);
+            if(nextHopRouterId== null){
+                nextHopRouterId = routerId;
+            }
+            builder.append(id+" -> "+routerId + " : Next Hop Router : "+nextHopRouterId+". Total cost on path "+distanceVector.get(routerId)+"\n");
+        });
+        builder.append("-------------------------------------------------------------------------------------\n");
+        System.out.println(builder);
+    }
+
+    
+
+    class RouterAndCost implements Comparable<RouterAndCost>{
+        Integer cost;
+        String routerId;
+
+        @Override
+        public int compareTo(RouterAndCost o) {
+            return cost.compareTo(o.cost);
+        }
+
+        @Override
+        public String toString(){
+            return "["+routerId+"  "+cost+"]";
+        }
     }
 }
